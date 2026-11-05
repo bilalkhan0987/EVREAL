@@ -199,6 +199,32 @@ def eval_method_on_sequence(dataset_name, eval_config, method_name, model, metho
     post_process_norm = method_config.get('post_process_norm', "none")
     event_tensor_normalization = method_config.get('event_tensor_normalization', False)
     color = eval_config.get('color', False)
+    # Optional warm-up: prime the recurrent state with the first `warmup_s` seconds of events played
+    # *backwards in time* (reversed order, flipped polarity), in windows of `warmup_window_s`. The reversed stream
+    # ends at the sequence start, so the primed state matches the scene at t0 (no ghosting from later poses).
+    warmup_s = eval_config.get('warmup_s', 0)
+    if warmup_s > 0:
+        warmup_window_s = eval_config.get('warmup_window_s', 0.0333)
+        dataset = data_loader.dataset
+        t0 = sequence['start_time_s']
+        edges = np.arange(t0 + warmup_s, t0 - 1e-9, -warmup_window_s)  # descending window edges
+        with torch.no_grad():
+            for t_hi, t_lo in zip(edges[:-1], edges[1:]):
+                i0, i1 = dataset.find_ts_index(t_lo), dataset.find_ts_index(t_hi)
+                if i1 - i0 < 2:
+                    continue
+                xs, ys, ts, ps = dataset.get_events(i0, i1)
+                xs = torch.from_numpy(xs[::-1].astype(np.float32))
+                ys = torch.from_numpy(ys[::-1].astype(np.float32))
+                ts = torch.from_numpy((t_hi - ts[::-1]).astype(np.float32))
+                ps = torch.from_numpy(-ps[::-1].astype(np.float32))
+                voxel = dataset.get_voxel_grid(xs, ys, ts, ps).unsqueeze(0)
+                if event_tensor_normalization:
+                    voxel = normalize_event_tensor(voxel)
+                voxel = voxel.to(device)
+                if not color:
+                    voxel = cropper.pad(voxel)
+                model(voxel)
     idx = 0
     for idx, item in enumerate(tqdm(data_loader)):
         if has_reference_frames:
