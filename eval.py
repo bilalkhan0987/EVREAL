@@ -387,9 +387,16 @@ def eval_method_with_config(eval_config, method_name, datasets, metrics):
                 print(color_progress(f"Evaluating {method_name} method with {eval_config['name']} evaluation config"
                                      f" on {sequence['name']} sequence from {dataset['name']} dataset. "
                                      f"({sequence_no}/{num_sequences} for this method and config)"))
-                results = eval_method_on_sequence(dataset['name'], eval_config, method_name, model, method_config, sequence, metrics)
-                num_evaluated, mean_scores = results
                 sequence_no += 1
+                try:
+                    results = eval_method_on_sequence(dataset['name'], eval_config, method_name, model,
+                                                      method_config, sequence, metrics)
+                except Exception as e:  # one failing sequence (e.g. CUDA OOM) must not skip the rest of the dataset
+                    print(color_error(f"SEQUENCE FAILED: {method_name} on {sequence['name']}: {e}"))
+                    print(color_error(traceback.format_exc()))
+                    torch.cuda.empty_cache()
+                    continue
+                num_evaluated, mean_scores = results
                 for metric_name, score in mean_scores.items():
                     dataset_metrics.update(metric_name, score, num_evaluated)
         except Exception as e:

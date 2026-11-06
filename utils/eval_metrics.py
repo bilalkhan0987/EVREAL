@@ -1,5 +1,6 @@
 import math
 import shutil
+import time
 import traceback
 from os.path import join
 import warnings
@@ -13,6 +14,25 @@ from skimage.metrics import structural_similarity as ssim
 from utils.create_vid import create_vid_from_recon_folder
 from utils.eval_utils import cv2torch
 from utils.eval_utils import append_timestamp, append_result, ensure_dir, save_inferred_image
+
+OOM_RETRIES = 5
+
+
+def call_with_oom_retry(fn, img_t, ref_t=None, retries=OOM_RETRIES):
+    """Run a metric network; on CUDA OOM (common on shared GPUs) free the cache, split the batch into single
+    images, and back off before retrying, instead of silently losing the scores."""
+    for attempt in range(retries):
+        try:
+            return fn(img_t) if ref_t is None else fn(img_t, ref_t)
+        except torch.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            if img_t.shape[0] > 1:
+                parts = [call_with_oom_retry(fn, img_t[i:i + 1], None if ref_t is None else ref_t[i:i + 1], retries)
+                         for i in range(img_t.shape[0])]
+                return torch.cat([p.reshape(-1) for p in parts])
+            print(f"CUDA OOM in metric, retry {attempt + 1}/{retries} after {10 * (attempt + 1)}s", flush=True)
+            time.sleep(10 * (attempt + 1))
+    return fn(img_t) if ref_t is None else fn(img_t, ref_t)  # last attempt: let the error propagate
 
 
 class BaseMetric:
@@ -122,9 +142,9 @@ class PyIqaMetricFactory:
             img_tensor = torch.cat(self.image_queue[-self.batch_size:])
             if self.ref_queue[0] is not None:
                 ref_tensor = torch.cat(self.ref_queue[-self.batch_size:])
-                score_tensor = iqa_metric(img_tensor, ref_tensor)
+                score_tensor = call_with_oom_retry(iqa_metric, img_tensor, ref_tensor)
             else:
-                score_tensor = iqa_metric(img_tensor)
+                score_tensor = call_with_oom_retry(iqa_metric, img_tensor)
             self.image_queue = []
             self.ref_queue = []
             score_list = score_tensor.squeeze().tolist()
